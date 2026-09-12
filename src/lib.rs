@@ -1,134 +1,120 @@
 pub mod parse;
 use parse::*;
 
-// подсказка: лучше использовать enum и match
-/// Режим чтения из логов всего подряд
-pub const READ_MODE_ALL: u8 = 0;
-/// Режим чтения из логов только ошибок
-pub const READ_MODE_ERRORS: u8 = 1;
-/// Режим чтения из логов только операций, касающихся деген
-pub const READ_MODE_EXCHANGES: u8 = 2;
-
-/// Обёртка, без которой не выполнено требование `std::io::BufReader<T: std::io::Read>`
-#[derive(Debug)]
-struct RefMutWrapper<'a, T>(std::cell::RefMut<'a, T>);
-impl<'a, T> std::io::Read for RefMutWrapper<'a, T>
-where T: std::io::Read
-{
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0.read(buf)
-    }
+/// Режим чтения из логов.
+/// Вместо трёх `u8`-констант — enum, чтобы компилятор проверял варианты.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadMode {
+    /// Читать всё подряд
+    All,
+    /// Читать только ошибки
+    Errors,
+    /// Читать только операции, касающиеся обменов
+    Exchanges,
 }
 
-/// Для `Box<dyn много трейтов, помимо auto-трейтов>`, (`rustc E0225`)
-/// `only auto traits can be used as additional traits in a trait object`
-/// `consider creating a new trait with all of these as supertraits and using that trait here instead`
-pub trait MyReader: std::io::Read + std::fmt::Debug + 'static
-{}
-impl<T: std::io::Read + std::fmt::Debug + 'static> MyReader for T
-{}
-// подсказка: вместо trait-объекта можно дженерик
-/// Итератор, на выходе которого - строки распарсенной структуры данных
-#[derive(Debug)]
-struct LogIterator {
-    lines: std::iter::Filter<std::io::Lines<std::io::BufReader<RefMutWrapper<'static, Box<dyn MyReader>>>>,fn(&Result<String,std::io::Error>)->bool>,
-    reader_rc: std::rc::Rc<std::cell::RefCell<Box<dyn MyReader>>>,
-}
-impl LogIterator {
-    fn new(r: std::rc::Rc<std::cell::RefCell<Box<dyn MyReader>>>) -> Self {
-        use std::io::BufRead;
-        // подсказка: unsafe избыточен, да и весь rc - тоже
-        // примечание автора прототипа:
-        // > Мотивация: хочу позаимствовать RefCell,
-        // > но боюсь, что Rc протухнет - поэтому буду хранить и Rc и RefMut.
-        // > Я знаю, что деструкторы полей структуры вызываются в
-        // > порядке объявления в структуре - то есть сначала будет удалён
-        // > мой RefMutWrapper, а уже потом и весь исходный reader_rc
-        let the_borrow = r.borrow_mut();
-        let the_borrow = unsafe{std::mem::transmute::<_,_>(the_borrow)};
-        Self{
-            lines: std::io::BufReader::with_capacity(4096, RefMutWrapper(the_borrow))
-                       .lines()
-                       .filter(
-                           |line_res|
-                           !line_res.as_ref().ok()
-                               .map(|line| line.trim().is_empty())
-                               .unwrap_or(false)
-                        ),
-            reader_rc: r,
-        }
-    }
-}
-impl Iterator for LogIterator {
-    type Item = parse::LogLine;
-    fn next(&mut self) -> Option<Self::Item> {
-        let line = self.lines.next()?.ok()?;
-        let (remaining, result) = LOG_LINE_PARSER.parse(line.trim().to_string()).ok()?;
-        remaining.trim().is_empty().then_some(result)
-    }
-}
-
-// подсказка: RefCell вообще не нужен
-/// Принимает поток байт, отдаёт отфильтрованные и распарсенные логи
-pub fn read_log(input: std::rc::Rc<std::cell::RefCell<Box<dyn MyReader>>>, mode: u8, request_ids: Vec<u32>) -> Vec<LogLine> {
-    let logs = LogIterator::new(input);
-    let mut collected = Vec::new();
-    // подсказка: можно обойтись итераторами
-    for log in logs {
-        if request_ids.is_empty() || {
-            let mut request_id_found = false;
-            for request_id in &request_ids {
-                if *request_id == log.request_id {
-                    request_id_found = true;
-                    break;
-                }
-            }
-            request_id_found
-        }
-        // подсказка: лучше match
-        && if mode == READ_MODE_ALL {
-                true
-            }
-            else if mode == READ_MODE_ERRORS {
-                matches!(
-                    &log.kind,
-                    LogKind::System(
-                        SystemLogKind::Error(_)) | LogKind::App(AppLogKind::Error(_)
-                    )
-                )
-            }
-            else if mode == READ_MODE_EXCHANGES {
-                matches!(
-                    &log.kind,
-                    LogKind::App(AppLogKind::Journal(
-                        AppLogJournalKind::BuyAsset(_)
+impl ReadMode {
+    fn matches(&self, kind: &LogKind) -> bool {
+        match self {
+            ReadMode::All => true,
+            ReadMode::Errors => matches!(
+                kind,
+                LogKind::System(SystemLogKind::Error(_)) | LogKind::App(AppLogKind::Error(_))
+            ),
+            ReadMode::Exchanges => matches!(
+                kind,
+                LogKind::App(AppLogKind::Journal(
+                    AppLogJournalKind::BuyAsset(_)
                         | AppLogJournalKind::SellAsset(_)
-                        | AppLogJournalKind::CreateUser{..}
-                        | AppLogJournalKind::RegisterAsset{..}
+                        | AppLogJournalKind::CreateUser { .. }
+                        | AppLogJournalKind::RegisterAsset { .. }
                         | AppLogJournalKind::DepositCash(_)
                         | AppLogJournalKind::WithdrawCash(_)
-                    ))
-                )
-            }
-            else {
-                // подсказка: паниковать в библиотечном коде - нехорошо
-                panic!("unknown mode {}", mode)
-            }
-        {
-            collected.push(log);
+                ))
+            ),
         }
     }
-    collected
 }
 
+/// Ошибка чтения логов
+#[derive(Debug)]
+pub enum ReadError {
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::Io(e) => write!(f, "io error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {}
+
+impl From<std::io::Error> for ReadError {
+    fn from(e: std::io::Error) -> Self {
+        ReadError::Io(e)
+    }
+}
+
+/// Итератор, на выходе которого — строки распарсенной структуры данных.
+/// Дженерик вместо `Box<dyn MyReader>` + `Rc<RefCell<...>>`.
+struct LogIterator<R: std::io::BufRead> {
+    lines: std::io::Lines<R>,
+}
+
+impl<R: std::io::BufRead> LogIterator<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            lines: reader.lines(),
+        }
+    }
+}
+
+impl<R: std::io::BufRead> Iterator for LogIterator<R> {
+    type Item = parse::LogLine;
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let line = self.lines.next()?.ok()?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let (remaining, result) = parse::parse_log_line(trimmed).ok()?;
+            if remaining.trim().is_empty() {
+                return Some(result);
+            }
+            // если строка распарсилась не полностью — пропускаем её
+        }
+    }
+}
+
+/// Принимает поток байт, отдаёт отфильтрованные и распарсенные логи.
+/// Без `Rc`, `RefCell`, `unsafe`, singleton'а и паник.
+pub fn read_log<R: std::io::Read>(
+    input: R,
+    mode: ReadMode,
+    request_ids: &[u32],
+) -> Result<Vec<LogLine>, ReadError> {
+    let reader = std::io::BufReader::with_capacity(4096, input);
+    let logs = LogIterator::new(reader);
+
+    let collected: Vec<LogLine> = logs
+        .filter(|log| request_ids.is_empty() || request_ids.contains(&log.request_id.get()))
+        .filter(|log| mode.matches(&log.kind))
+        .collect();
+
+    Ok(collected)
+}
 
 #[cfg(test)]
 mod test {
     use super::*;
 
-    const SOURCE1: &'static str = r#"System::Error NetworkError "url unknown" requestid=1"#;
+    const SOURCE1: &str = r#"System::Error NetworkError "url unknown" requestid=1"#;
 
-    const SOURCE: &'static str = r#"
+    const SOURCE: &str = r#"
 System::Error NetworkError "network interface is down" requestid=1
 App::Error SystemError "network" requestid=1
 System::Trace SendRequest "CreateUser{\"user_id\": 10, \"authrized_capital\": 1000,}" requestid=2
@@ -140,8 +126,6 @@ System::Trace SendRequest "login me" requestid=3
 System::Trace SendRequest "login me" requestid=4
 System::Trace GetResponse "HTTP 200" requestid=3
 System::Trace GetResponse "HTTP 200" requestid=4
-App::Trace Connect 30c305825b900077ae7f8259c1c328aa3e124a07f3bfbbf216dfc6e308beea6e474b9a7ea6c24d003a6ae4fcf04a9e6ef7c7f17cdaa0296f66a88036badcf01f053da806fad356546349deceff24621b895440d05a715b221af8e9e068073d6dec04f148175717d3c2d1b6af84e2375718ab4a1eba7e037c1c1d43b4cf422d6f2aa9194266f0a7544eaeff8167f0e993d0ea6a8ddb98bfeb8805635d5ea9f6592fd5297e6f83b6834190f99449722cd0de87a4c122f08bbe836fd3092e5f0d37a3057e90f3dd41048da66cad3e8fd3ef72a9d86ecd9009c2db996af29dc62af5ef5eb04d0e16ce8fcecba92a4a9888f52d5d575e7dbc302ed97dbf69df15bb4f5c5601d38fbe3bd89d88768a6aed11ce2f95a6ad30bb72e787bfb734701cea1f38168be44ea19d3e98dd3c953fdb9951ac9c6e221bb0f980d8f0952ac8127da5bda7077dd25ffc8e1515c529f29516dacec6be9c084e6c91698267b2aed9038eca5ebafad479c5fb17652e25bb5b85586fae645bd7c3253d9916c0af65a20253412d5484ac15d288c6ca8823469090ded5ce0975dada63653797129f0e926af6247b457b067db683e37d848e0acf30e5602b78f1848e8da4b640ed08b75f3519a40ec96b2be964234beab37759504376c6e5ebfacdc57e4c7a22cf1e879d7bde29a2dca5fe20420215b59d102fd016606c533e8e36f7da114910664bade9b295d9043a01bc0dc4d8abbc16b1cec7789d89e699ad99dae597c7f10d6f047efc011d67444695cb8e6e8b3dba17ccc693729d01312d0f12a3fc76e12c2e4984af5cb3049b9d8a13124a1f770e96bae1fb153ba4c91bea4fae6f03010275d5a9b14012bdd678e037934dc6762005de54b32a7684e03060d5cc80378e9bef05b8f0692202944401bd06e4553e4490a0e57c5a72fc8abb1f714e22ea950fb2f1de284d6ff3da435954de355c677f60db4252a510919cbe7dadfed0441cf125fd8894753af8114f2ddacb75c3daa460920fc47d285e59fe9110e4151fcef03fa246cd2dd9a4d573e1dbbda1c6968cf4f546289b95ce1bf0a55eea6531382826d4002bc46bf441ce16056d42b5a2079e299e3191c23a7604cde03de6081e06f93cfe632c9a6088cd328662d47a4954934832df5b5f3765dbe136114c73c55cb7ce639e5d40d1d1d8f540d3c8e1bc7423f032c0da5264353468f009c973eec0448e41f9289e8d9dadc68da77d3c3ab3a6477d44024f21fba0bd4477d81c6027657527aa0413b45f417cb7b3beea835a1d5d795414d38156324cb5c1303e9924dbe40cd497c4c23c221cb912058c939bea8b79b3fea360fecaa83375a9a84e338d9e863e8021ad2df4430b8dea0c1714e1bdc478f559705549ad738453ab65c0ffcc8cf0e3bafaf4afad75ecc4dfad0de0cfe27d50d656456ea6c361b76508357714079424 requestid=4
-App::Trace Connect 15c947b96c3eec82f467da2fe5cf4ac597d73d8710850fac38cb30edbff32b33725d4ddc9baa51a63c13438ddcc02ef82ea39b60f059119c79986bf76346609214d3e5e722647a7ab9657229966fdbdcdadfb9f05e4bb421e9a3d9d414c965cc08ed6f628fe282dff722ff2989c12b7bc55c3a0224a0d2eb9a77e65346450bb9bb2904629db20756deffa062dacff816b4d551c1fb42239af506baaa53c48b3939e9db189db5c4068cbc70e2792318a3636d296a90a9ffdf84399d8fa7e9b330368d973bc3a7c3c92f3df4fa2ebb9ddf55552e3c103625f037fc1c428e174719d24df700190d9780387f2d6f376347ca75bfd9542616554e1af39b36e0eb5593d976b5a844f8e108ec70b7e8973bd169edb83bbebf10f699b56f578988f23570c7dc7ab06b303fae8f093a2983fc08519e81b749dfb9dab7109d3046b65ac95575ce7310e062bc0d538339eba8fe692bb4c157c8766322a9741a8aaf5d9554f3da0af5c0ad26a4a283e708a1b06be70185ecfc4edb622ed1c138d5d9670502158d1f386c9acecb1140d5d10bc01c13612518f228556217a3a1933bcc052f263e44bf749a9db4d42086bc5464eb29511c07cadbfccfe2e080f4170f7b48eba79cccc8c378895b023aeff8b12d4bab30a6e9fc309c054ea921e2a895d4faeb7c94781d9eac0b2829782ea214911043a3c696cebd06f67cd8b976abfcc60c18e8a94d676c23356a7716a27ad2cfb12529f2d3cc33e361c3957a149fccd7da1b0dc039407743b6673e5e3383eba5163d3d5961a0fdf7bd2ec852f4175bde6af4a21be907bda649ff06e913e37c4184f6d572dc0fb896549f6d9dec24e6c57447d5940f6b9460249eb14d49b2153412f445b129132a8797c1abbbc180470484d9ea003922cfbef3f35a6f961ad268474c45d922c305ce85653ab8749bd2b05d47d0dec77ee0aba4a362a02209d24ed8f417af8c68b1674066cba32444b94ca70f1a545fd5352163660c2df872815e1d389765bb41c32955fb146ab2ba5e53373f154587790e11c1a597e2fb6cfc38355cdbcdaad26a044f41925bfc03f2e3b86c61e14356492b31423739b1706999051632b3667d5e5ce4789f7cfa60b902c72cbc944b4a1eb80fbb341cda5cc8bf59a3c7bd02814e7c9d283bd54f512e013119aea332f4d2eadc444df1aa1927ebb7dcc3b71434e12322551415321e4ec3ccfa42d1b2797791e3d34550bcf7eeb9238f366e8283094c6c29b0e8a51d448b19ce0a1e686c1a48479d2fdf9160eedca2fbc7c0165e1abf4cad03aa12fdab5df4405e2f8e9a4977306c89b798ade959085ef3a45041dd6fa366e38b33301b7a3ae1a78ae94a5cf34b45296845e93c7e1b45277901bbbf802d647cc4954afed42328481f1b7bc0081271fc03d2518527d88f5f3b66452f998f0a5d766197b9eb595945bb requestid=3
 System::Trace SendRequest "Jupiter->CreateUser{\"user_id\": \"Bob\", \"authrized_capital\": 1000,}" requestid=4
 System::Trace SendRequest "Jupiter->CreateUser{\"user_id\": \"Alice\", \"authrized_capital\": 5000,}" requestid=3
 App::Trace SendRequest "CreateUser{\"user_id\": \"Bob\", \"authrized_capital\": 1000,}" requestid=4
@@ -192,17 +176,32 @@ App::Trace GetResponse "Ok" requestid=10
 App::Journal BuyAsset UserBacket{"user_id":"Alice","backet":Backet{"asset_id":"milk","count":5,},} requestid=10
         "#;
 
-
     #[test]
     fn test_all() {
-        let refcell1: std::rc::Rc<std::cell::RefCell<Box<dyn MyReader>>> = std::rc::Rc::new(std::cell::RefCell::new(Box::new(SOURCE1.as_bytes())));
-        assert_eq!(read_log(refcell1.clone(), READ_MODE_ALL, vec![]).len(), 1);
-        let refcell: std::rc::Rc<std::cell::RefCell<Box<dyn MyReader>>> = std::rc::Rc::new(std::cell::RefCell::new(Box::new(SOURCE.as_bytes())));
-        let all_parsed = read_log(refcell.clone(), READ_MODE_ALL, vec![]);
+        let all_parsed = read_log(SOURCE1.as_bytes(), ReadMode::All, &[]).unwrap();
+        assert_eq!(all_parsed.len(), 1);
+
+        let all_parsed = read_log(SOURCE.as_bytes(), ReadMode::All, &[]).unwrap();
         println!("all parsed:");
         all_parsed.iter().for_each(|parsed| println!("  {:?}", parsed));
         // 2 для начала и конца строки (чтобы первая и последняя кавычки на отдельных строках были)
         // второе число - число пустых строк, которые оставлены для удобства чтения
-        assert_eq!(all_parsed.len(), SOURCE.lines().count()-2-7);
+        assert_eq!(all_parsed.len(), SOURCE.lines().count() - 2 - 7);
+    }
+
+    #[test]
+    fn test_errors_mode() {
+        let only_errors = read_log(SOURCE.as_bytes(), ReadMode::Errors, &[]).unwrap();
+        assert!(only_errors.iter().all(|l| matches!(
+            l.kind,
+            LogKind::System(SystemLogKind::Error(_)) | LogKind::App(AppLogKind::Error(_))
+        )));
+    }
+
+    #[test]
+    fn test_request_id_filter() {
+        let only_3 = read_log(SOURCE.as_bytes(), ReadMode::All, &[3]).unwrap();
+        assert!(only_3.iter().all(|l| l.request_id.get() == 3));
+        assert!(!only_3.is_empty());
     }
 }
