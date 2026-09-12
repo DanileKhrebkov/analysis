@@ -1,16 +1,29 @@
 /// Трейт, чтобы **реализовывать** и **требовать** метод 'распарсь и покажи,
 /// что распарсить осталось'
-trait Parser {
+pub trait Parser {
     type Dest;
     fn parse<'a>(&self, input: &'a str) -> Result<(&'a str, Self::Dest), ()>;
 }
 /// Вспомогательный трейт, чтобы писать собственный десериализатор
-trait Parsable: Sized {
+pub trait Parsable: Sized {
     type Parser: Parser<Dest = Self>;
     fn parser() -> Self::Parser;
 }
 
-mod stdp {
+/// Ошибка парсинга.
+/// Введена, чтобы `?` в `main` работал без хаков вокруг `()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseError;
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "parse error")
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+pub mod stdp {
     use super::Parser;
     use std::num::{NonZeroI32, NonZeroU32};
 
@@ -37,9 +50,12 @@ mod stdp {
             Ok((&remaining[end_idx..], value))
         }
     }
-    /// Знаковые числа
+    /// Знаковые числа.
+    /// Не используется в проде (только в тестах), но оставлен для полноты API.
+    #[allow(dead_code)]
     #[derive(Debug)]
     pub struct I32;
+    #[allow(dead_code)]
     impl Parser for I32 {
         type Dest = NonZeroI32;
         fn parse<'a>(&self, input: &'a str) -> Result<(&'a str, Self::Dest), ()> {
@@ -69,7 +85,9 @@ mod stdp {
     }
 }
 
-/// Обернуть строку в кавычки, экранировав кавычки, которые в строке уже есть
+/// Обернуть строку в кавычки, экранировав кавычки, которые в строке уже есть.
+/// Используется только в тестах и потому не является частью публичного API.
+#[allow(dead_code)]
 fn quote(input: &str) -> String {
     let mut result = String::from("\"");
     result.extend(
@@ -85,11 +103,17 @@ fn quote(input: &str) -> String {
     result
 }
 /// Распарсить строку, которую ранее [обернули в кавычки](quote)
+/// Распарсить строку, которую ранее [обернули в кавычки](quote)
 fn do_unquote(input: &str) -> Result<(&str, String), ()> {
     let mut result = String::new();
     let mut escaped_now = false;
-    let mut chars = input.strip_prefix("\"").ok_or(())?.char_indices();
-    while let Some((idx, c)) = chars.next() {
+    let mut iter = input.char_indices();
+    // пропускаем ведущую кавычку
+    match iter.next() {
+        Some((_, '"')) => {}
+        _ => return Err(()),
+    }
+    while let Some((idx, c)) = iter.next() {
         match (c, escaped_now) {
             ('"' | '\\', true) => {
                 result.push(c);
@@ -122,7 +146,7 @@ fn do_unquote_non_escaped(input: &str) -> Result<(&str, String), ()> {
 }
 /// Парсер кавычек
 #[derive(Debug, Clone)]
-struct Unquote;
+pub struct Unquote;
 impl Parser for Unquote {
     type Dest = String;
     fn parse<'a>(&self, input: &'a str) -> Result<(&'a str, Self::Dest), ()> {
@@ -130,12 +154,15 @@ impl Parser for Unquote {
     }
 }
 /// Конструктор [Unquote]
-fn unquote() -> Unquote {
+pub fn unquote() -> Unquote {
     Unquote
 }
-/// Парсер, возвращающий результат как есть
+/// Парсер, возвращающий результат как есть.
+/// Не используется в проде, оставлен для полноты API.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
-struct AsIs;
+pub struct AsIs;
+#[allow(dead_code)]
 impl Parser for AsIs {
     type Dest = String;
     fn parse<'a>(&self, input: &'a str) -> Result<(&'a str, Self::Dest), ()> {
@@ -144,8 +171,8 @@ impl Parser for AsIs {
 }
 /// Парсер константных строк
 #[derive(Debug, Clone)]
-struct Tag {
-    tag: &'static str,
+pub struct Tag {
+    pub tag: &'static str,
 }
 impl Parser for Tag {
     type Dest = ();
@@ -154,12 +181,12 @@ impl Parser for Tag {
     }
 }
 /// Конструктор [Tag]
-fn tag(tag: &'static str) -> Tag {
+pub fn tag(tag: &'static str) -> Tag {
     Tag { tag }
 }
 /// Парсер [тэга](Tag), обёрнутого в кавычки
 #[derive(Debug, Clone)]
-struct QuotedTag(Tag);
+pub struct QuotedTag(pub Tag);
 impl Parser for QuotedTag {
     type Dest = ();
     fn parse<'a>(&self, input: &'a str) -> Result<(&'a str, Self::Dest), ()> {
@@ -171,13 +198,13 @@ impl Parser for QuotedTag {
     }
 }
 /// Конструктор [QuotedTag]
-fn quoted_tag(tag: &'static str) -> QuotedTag {
+pub fn quoted_tag(tag: &'static str) -> QuotedTag {
     QuotedTag(Tag { tag })
 }
 /// Комбинатор, пробрасывающий строку без лидирующих пробелов
 #[derive(Debug, Clone)]
-struct StripWhitespace<T> {
-    parser: T,
+pub struct StripWhitespace<T> {
+    pub parser: T,
 }
 impl<T: Parser> Parser for StripWhitespace<T> {
     type Dest = T::Dest;
@@ -188,15 +215,15 @@ impl<T: Parser> Parser for StripWhitespace<T> {
     }
 }
 /// Конструктор [StripWhitespace]
-fn strip_whitespace<T: Parser>(parser: T) -> StripWhitespace<T> {
+pub fn strip_whitespace<T: Parser>(parser: T) -> StripWhitespace<T> {
     StripWhitespace { parser }
 }
 /// Комбинатор `delimited`
 #[derive(Debug, Clone)]
-struct Delimited<Prefix, T, Suffix> {
-    prefix_to_ignore: Prefix,
-    dest_parser: T,
-    suffix_to_ignore: Suffix,
+pub struct Delimited<Prefix, T, Suffix> {
+    pub prefix_to_ignore: Prefix,
+    pub dest_parser: T,
+    pub suffix_to_ignore: Suffix,
 }
 impl<Prefix, T, Suffix> Parser for Delimited<Prefix, T, Suffix>
 where
@@ -214,7 +241,7 @@ where
     }
 }
 /// Конструктор [Delimited]
-fn delimited<Prefix, T, Suffix>(
+pub fn delimited<Prefix, T, Suffix>(
     prefix_to_ignore: Prefix,
     dest_parser: T,
     suffix_to_ignore: Suffix,
@@ -232,9 +259,9 @@ where
 }
 /// Комбинатор-отображение
 #[derive(Debug, Clone)]
-struct Map<T, M> {
-    parser: T,
-    map: M,
+pub struct Map<T, M> {
+    pub parser: T,
+    pub map: M,
 }
 impl<T: Parser, Dest: Sized, M: Fn(T::Dest) -> Dest> Parser for Map<T, M> {
     type Dest = Dest;
@@ -245,14 +272,14 @@ impl<T: Parser, Dest: Sized, M: Fn(T::Dest) -> Dest> Parser for Map<T, M> {
     }
 }
 /// Конструктор [Map]
-fn map<T: Parser, Dest: Sized, M: Fn(T::Dest) -> Dest>(parser: T, map: M) -> Map<T, M> {
+pub fn map<T: Parser, Dest: Sized, M: Fn(T::Dest) -> Dest>(parser: T, map: M) -> Map<T, M> {
     Map { parser, map }
 }
 /// Комбинатор с отбрасываемым префиксом
 #[derive(Debug, Clone)]
-struct Preceded<Prefix, T> {
-    prefix_to_ignore: Prefix,
-    dest_parser: T,
+pub struct Preceded<Prefix, T> {
+    pub prefix_to_ignore: Prefix,
+    pub dest_parser: T,
 }
 impl<Prefix, T> Parser for Preceded<Prefix, T>
 where
@@ -266,7 +293,7 @@ where
     }
 }
 /// Конструктор [Preceded]
-fn preceded<Prefix, T>(prefix_to_ignore: Prefix, dest_parser: T) -> Preceded<Prefix, T>
+pub fn preceded<Prefix, T>(prefix_to_ignore: Prefix, dest_parser: T) -> Preceded<Prefix, T>
 where
     Prefix: Parser,
     T: Parser,
@@ -278,8 +305,8 @@ where
 }
 /// Комбинатор, который требует, чтобы все дочерние парсеры отработали
 #[derive(Debug, Clone)]
-struct All<T> {
-    parser: T,
+pub struct All<T> {
+    pub parser: T,
 }
 impl<A0, A1> Parser for All<(A0, A1)>
 where
@@ -295,7 +322,7 @@ where
             .map(|(remaining, a1)| (remaining, (a0, a1)))
     }
 }
-fn all2<A0: Parser, A1: Parser>(a0: A0, a1: A1) -> All<(A0, A1)> {
+pub fn all2<A0: Parser, A1: Parser>(a0: A0, a1: A1) -> All<(A0, A1)> {
     All { parser: (a0, a1) }
 }
 impl<A0, A1, A2> Parser for All<(A0, A1, A2)>
@@ -314,7 +341,8 @@ where
             .map(|(remaining, a2)| (remaining, (a0, a1, a2)))
     }
 }
-fn all3<A0: Parser, A1: Parser, A2: Parser>(a0: A0, a1: A1, a2: A2) -> All<(A0, A1, A2)> {
+#[allow(dead_code)]
+pub fn all3<A0: Parser, A1: Parser, A2: Parser>(a0: A0, a1: A1, a2: A2) -> All<(A0, A1, A2)> {
     All {
         parser: (a0, a1, a2),
     }
@@ -337,7 +365,8 @@ where
             .map(|(remaining, a3)| (remaining, (a0, a1, a2, a3)))
     }
 }
-fn all4<A0: Parser, A1: Parser, A2: Parser, A3: Parser>(
+#[allow(dead_code)]
+pub fn all4<A0: Parser, A1: Parser, A2: Parser, A3: Parser>(
     a0: A0,
     a1: A1,
     a2: A2,
@@ -349,8 +378,8 @@ fn all4<A0: Parser, A1: Parser, A2: Parser, A3: Parser>(
 }
 /// Комбинатор `"ключ":значение,`
 #[derive(Debug, Clone)]
-struct KeyValue<T> {
-    parser: Delimited<
+pub struct KeyValue<T> {
+    pub parser: Delimited<
         All<(StripWhitespace<QuotedTag>, StripWhitespace<Tag>)>,
         StripWhitespace<T>,
         StripWhitespace<Tag>,
@@ -366,7 +395,7 @@ where
     }
 }
 /// Конструктор [KeyValue]
-fn key_value<T: Parser>(key: &'static str, value_parser: T) -> KeyValue<T> {
+pub fn key_value<T: Parser>(key: &'static str, value_parser: T) -> KeyValue<T> {
     KeyValue {
         parser: delimited(
             all2(strip_whitespace(quoted_tag(key)), strip_whitespace(tag(":"))),
@@ -377,8 +406,8 @@ fn key_value<T: Parser>(key: &'static str, value_parser: T) -> KeyValue<T> {
 }
 /// Комбинатор `permutation`
 #[derive(Debug, Clone)]
-struct Permutation<T> {
-    parsers: T,
+pub struct Permutation<T> {
+    pub parsers: T,
 }
 impl<A0, A1> Parser for Permutation<(A0, A1)>
 where
@@ -402,7 +431,7 @@ where
         }
     }
 }
-fn permutation2<A0: Parser, A1: Parser>(a0: A0, a1: A1) -> Permutation<(A0, A1)> {
+pub fn permutation2<A0: Parser, A1: Parser>(a0: A0, a1: A1) -> Permutation<(A0, A1)> {
     Permutation { parsers: (a0, a1) }
 }
 impl<A0, A1, A2> Parser for Permutation<(A0, A1, A2)>
@@ -460,7 +489,7 @@ where
         }
     }
 }
-fn permutation3<A0: Parser, A1: Parser, A2: Parser>(
+pub fn permutation3<A0: Parser, A1: Parser, A2: Parser>(
     a0: A0,
     a1: A1,
     a2: A2,
@@ -471,8 +500,8 @@ fn permutation3<A0: Parser, A1: Parser, A2: Parser>(
 }
 /// Комбинатор списка
 #[derive(Debug, Clone)]
-struct List<T> {
-    parser: T,
+pub struct List<T> {
+    pub parser: T,
 }
 impl<T: Parser> Parser for List<T> {
     type Dest = Vec<T::Dest>;
@@ -490,13 +519,13 @@ impl<T: Parser> Parser for List<T> {
         }
     }
 }
-fn list<T: Parser>(parser: T) -> List<T> {
+pub fn list<T: Parser>(parser: T) -> List<T> {
     List { parser }
 }
 /// Комбинатор `alt` через `or_else`
 #[derive(Debug, Clone)]
-struct Alt<T> {
-    parser: T,
+pub struct Alt<T> {
+    pub parser: T,
 }
 impl<A0, A1, Dest> Parser for Alt<(A0, A1)>
 where
@@ -511,7 +540,10 @@ where
             .or_else(|_| self.parser.1.parse(input))
     }
 }
-fn alt2<Dest, A0: Parser<Dest = Dest>, A1: Parser<Dest = Dest>>(a0: A0, a1: A1) -> Alt<(A0, A1)> {
+pub fn alt2<Dest, A0: Parser<Dest = Dest>, A1: Parser<Dest = Dest>>(
+    a0: A0,
+    a1: A1,
+) -> Alt<(A0, A1)> {
     Alt { parser: (a0, a1) }
 }
 impl<A0, A1, A2, Dest> Parser for Alt<(A0, A1, A2)>
@@ -529,7 +561,7 @@ where
             .or_else(|_| self.parser.2.parse(input))
     }
 }
-fn alt3<Dest, A0: Parser<Dest = Dest>, A1: Parser<Dest = Dest>, A2: Parser<Dest = Dest>>(
+pub fn alt3<Dest, A0: Parser<Dest = Dest>, A1: Parser<Dest = Dest>, A2: Parser<Dest = Dest>>(
     a0: A0,
     a1: A1,
     a2: A2,
@@ -555,7 +587,7 @@ where
             .or_else(|_| self.parser.3.parse(input))
     }
 }
-fn alt4<
+pub fn alt4<
     Dest,
     A0: Parser<Dest = Dest>,
     A1: Parser<Dest = Dest>,
@@ -596,7 +628,7 @@ where
             .or_else(|_| self.parser.7.parse(input))
     }
 }
-fn alt8<
+pub fn alt8<
     Dest,
     A0: Parser<Dest = Dest>,
     A1: Parser<Dest = Dest>,
@@ -622,9 +654,10 @@ fn alt8<
 }
 
 /// Комбинатор для применения дочернего парсера N раз
-struct Take<T> {
-    count: usize,
-    parser: T,
+#[derive(Debug, Clone)]
+pub struct Take<T> {
+    pub count: usize,
+    pub parser: T,
 }
 impl<T: Parser> Parser for Take<T> {
     type Dest = Vec<T::Dest>;
@@ -639,7 +672,7 @@ impl<T: Parser> Parser for Take<T> {
         Ok((remaining, result))
     }
 }
-fn take<T: Parser>(count: usize, parser: T) -> Take<T> {
+pub fn take<T: Parser>(count: usize, parser: T) -> Take<T> {
     Take { count, parser }
 }
 
@@ -648,7 +681,7 @@ const AUTHDATA_SIZE: usize = 1024;
 /// Данные для авторизации.
 /// Хранятся в `Box`, чтобы не раздувать стек варианта enum, в котором лежат.
 #[derive(Debug, Clone, PartialEq)]
-pub struct AuthData([u8; AUTHDATA_SIZE]);
+pub struct AuthData(pub [u8; AUTHDATA_SIZE]);
 impl Parsable for AuthData {
     type Parser = Map<Take<stdp::Byte>, fn(Vec<u8>) -> Self>;
     fn parser() -> Self::Parser {
@@ -658,17 +691,20 @@ impl Parsable for AuthData {
     }
 }
 
-/// Конструкция 'либо-либо'
-enum Either<Left, Right> {
+/// Конструкция 'либо-либо'. Не используется, оставлена для полноты API.
+#[allow(dead_code)]
+pub enum Either<Left, Right> {
     Left(Left),
     Right(Right),
 }
 
-/// Статус, которые можно парсить
-enum Status {
+/// Статус, которые можно парсить. Не используется, оставлен для полноты API.
+#[allow(dead_code)]
+pub enum Status {
     Ok,
     Err(String),
 }
+#[allow(dead_code)]
 impl Parsable for Status {
     type Parser = Alt<(
         Map<Tag, fn(()) -> Self>,
@@ -826,7 +862,7 @@ impl Parsable for UserBackets {
 }
 /// Список опубликованных бакетов
 #[derive(Debug, Clone, PartialEq)]
-pub struct Announcements(Vec<UserBackets>);
+pub struct Announcements(pub Vec<UserBackets>);
 impl Parsable for Announcements {
     type Parser = Map<List<<UserBackets as Parsable>::Parser>, fn(Vec<UserBackets>) -> Self>;
     fn parser() -> Self::Parser {
@@ -838,8 +874,8 @@ impl Parsable for Announcements {
 }
 
 /// Одна дженерик-обёртка вместо шести функций `just_parse_*`
-pub fn just_parse<T: Parsable>(input: &str) -> Result<(&str, T), ()> {
-    T::parser().parse(input)
+pub fn just_parse<T: Parsable>(input: &str) -> Result<(&str, T), ParseError> {
+    T::parser().parse(input).map_err(|_| ParseError)
 }
 
 /// Все виды логов
@@ -1227,8 +1263,10 @@ impl Parsable for LogLine {
 
 /// Парсер одной строки лога.
 /// Вместо singleton'а `LOG_LINE_PARSER` — просто функция: парсеры дёшевы в сборке.
-pub fn parse_log_line(input: &str) -> Result<(&str, LogLine), ()> {
-    <LogLine as Parsable>::parser().parse(input)
+pub fn parse_log_line(input: &str) -> Result<(&str, LogLine), ParseError> {
+    <LogLine as Parsable>::parser()
+        .parse(input)
+        .map_err(|_| ParseError)
 }
 
 #[cfg(test)]
@@ -1257,14 +1295,11 @@ mod test {
         assert_eq!(stdp::I32.parse("411").map(|(r, v)| (r, v.get())), Ok(("", 411)));
         assert_eq!(stdp::I32.parse("411ab").map(|(r, v)| (r, v.get())), Ok(("ab", 411)));
         assert_eq!(stdp::I32.parse(""), Err(()));
-        assert_eq!(
-            stdp::I32.parse("-3").map(|(r, v)| (r, v.get())),
-            Ok(("", -3))
-        );
+        assert_eq!(stdp::I32.parse("-3").map(|(r, v)| (r, v.get())), Ok(("", -3)));
         assert_eq!(stdp::I32.parse("0x03"), Err(()));
         assert_eq!(stdp::I32.parse("-"), Err(()));
         assert_eq!(stdp::I32.parse("0"), Err(()));
-        let _ = NonZeroI32::new(1); // проверка, что тип импортируется
+        let _ = NonZeroI32::new(1);
     }
 
     #[test]
@@ -1275,7 +1310,10 @@ mod test {
 
     #[test]
     fn test_do_unquote_non_escaped() {
-        assert_eq!(do_unquote_non_escaped(r#""411""#), Ok(("", "411".to_string())));
+        assert_eq!(
+            do_unquote_non_escaped(r#""411""#),
+            Ok(("", "411".to_string()))
+        );
         assert_eq!(do_unquote_non_escaped(r#" "411""#), Err(()));
         assert_eq!(do_unquote_non_escaped(r#"411"#), Err(()));
     }
@@ -1286,7 +1324,10 @@ mod test {
         assert_eq!(Unquote.parse(r#" "411""#), Err(()));
         assert_eq!(Unquote.parse(r#"411"#), Err(()));
 
-        assert_eq!(Unquote.parse(r#""ni\\c\"e""#), Ok(("", r#"ni\c"e"#.to_string())));
+        assert_eq!(
+            Unquote.parse(r#""ni\\c\"e""#),
+            Ok(("", r#"ni\c"e"#.to_string()))
+        );
     }
 
     #[test]
@@ -1310,7 +1351,9 @@ mod test {
         );
         assert_eq!(strip_whitespace(tag("hello")).parse("hello"), Ok(("", ())));
         assert_eq!(
-            strip_whitespace(stdp::U32).parse(" 42 answer").map(|(r, v)| (r, v.get())),
+            strip_whitespace(stdp::U32)
+                .parse(" 42 answer")
+                .map(|(r, v)| (r, v.get())),
             Ok(("answer", 42))
         );
     }
@@ -1318,11 +1361,15 @@ mod test {
     #[test]
     fn test_delimited() {
         assert_eq!(
-            delimited(tag("["), stdp::U32, tag("]")).parse("[0x32]").map(|(r, v)| (r, v.get())),
+            delimited(tag("["), stdp::U32, tag("]"))
+                .parse("[0x32]")
+                .map(|(r, v)| (r, v.get())),
             Ok(("", 0x32))
         );
         assert_eq!(
-            delimited(tag("["), stdp::U32, tag("]")).parse("[0x32] nice").map(|(r, v)| (r, v.get())),
+            delimited(tag("["), stdp::U32, tag("]"))
+                .parse("[0x32] nice")
+                .map(|(r, v)| (r, v.get())),
             Ok((" nice", 0x32))
         );
         assert_eq!(delimited(tag("["), stdp::U32, tag("]")).parse("0x32]"), Err(()));
@@ -1332,13 +1379,17 @@ mod test {
     #[test]
     fn test_key_value() {
         assert_eq!(
-            key_value("key", stdp::U32).parse(r#""key":32,"#).map(|(r, v)| (r, v.get())),
+            key_value("key", stdp::U32)
+                .parse(r#""key":32,"#)
+                .map(|(r, v)| (r, v.get())),
             Ok(("", 32))
         );
         assert_eq!(key_value("key", stdp::U32).parse(r#"key:32,"#), Err(()));
         assert_eq!(key_value("key", stdp::U32).parse(r#""key":32"#), Err(()));
         assert_eq!(
-            key_value("key", stdp::U32).parse(r#" "key" : 32 , nice"#).map(|(r, v)| (r, v.get())),
+            key_value("key", stdp::U32)
+                .parse(r#" "key" : 32 , nice"#)
+                .map(|(r, v)| (r, v.get())),
             Ok(("nice", 32))
         );
     }
@@ -1346,16 +1397,22 @@ mod test {
     #[test]
     fn test_list() {
         assert_eq!(
-            list(stdp::U32).parse("[1,2,3,4,]").map(|(r, v)| (r, v.into_iter().map(|x| x.get()).collect::<Vec<_>>())),
+            list(stdp::U32)
+                .parse("[1,2,3,4,]")
+                .map(|(r, v)| (r, v.into_iter().map(|x| x.get()).collect::<Vec<_>>())),
             Ok(("", vec![1, 2, 3, 4]))
         );
         assert_eq!(
-            list(stdp::U32).parse(" [ 1 , 2 , 3 , 4 , ] nice").map(|(r, v)| (r, v.into_iter().map(|x| x.get()).collect::<Vec<_>>())),
+            list(stdp::U32)
+                .parse(" [ 1 , 2 , 3 , 4 , ] nice")
+                .map(|(r, v)| (r, v.into_iter().map(|x| x.get()).collect::<Vec<_>>())),
             Ok(("nice", vec![1, 2, 3, 4]))
         );
         assert_eq!(list(stdp::U32).parse("1,2,3,4,"), Err(()));
         assert_eq!(
-            list(stdp::U32).parse("[]").map(|(r, v)| (r, v.into_iter().map(|x| x.get()).collect::<Vec<_>>())),
+            list(stdp::U32)
+                .parse("[]")
+                .map(|(r, v)| (r, v.into_iter().map(|x| x.get()).collect::<Vec<_>>())),
             Ok(("", vec![]))
         );
     }
@@ -1371,7 +1428,8 @@ mod test {
     #[test]
     fn test_asset_dsc() {
         assert_eq!(
-            all2(strip_whitespace(tag("AssetDsc")), strip_whitespace(tag("{"))).parse(" AssetDsc { "),
+            all2(strip_whitespace(tag("AssetDsc")), strip_whitespace(tag("{")))
+                .parse(" AssetDsc { "),
             Ok(("", ((), ())))
         );
 
@@ -1396,7 +1454,8 @@ mod test {
             ))
         );
         assert_eq!(
-            AssetDsc::parser().parse(r#" AssetDsc { "id" : "usd" , "dsc" : "USA dollar" , } nice "#),
+            AssetDsc::parser()
+                .parse(r#" AssetDsc { "id" : "usd" , "dsc" : "USA dollar" , } nice "#),
             Ok((
                 "nice ",
                 AssetDsc {
@@ -1460,7 +1519,9 @@ mod test {
             ))
         );
         assert_eq!(
-            LogKind::parser().parse(r#"App::Journal CreateUser {"user_id": "Steeve", "authorized_capital": 10000,}"#),
+            LogKind::parser().parse(
+                r#"App::Journal CreateUser {"user_id": "Steeve", "authorized_capital": 10000,}"#
+            ),
             Ok((
                 "",
                 LogKind::App(AppLogKind::Journal(AppLogJournalKind::CreateUser {
@@ -1479,7 +1540,9 @@ mod test {
             ))
         );
         assert_eq!(
-            LogKind::parser().parse(r#"App::Journal RegisterAsset {"asset_id": "bayc", "liquidity": 100000000, "user_id": "Steeve",}"#),
+            LogKind::parser().parse(
+                r#"App::Journal RegisterAsset {"asset_id": "bayc", "liquidity": 100000000, "user_id": "Steeve",}"#
+            ),
             Ok((
                 "",
                 LogKind::App(AppLogKind::Journal(AppLogJournalKind::RegisterAsset {
@@ -1490,7 +1553,8 @@ mod test {
             ))
         );
         assert_eq!(
-            LogKind::parser().parse(r#"App::Journal DepositCash UserCash{"user_id": "Steeve", "count": 10,}"#),
+            LogKind::parser()
+                .parse(r#"App::Journal DepositCash UserCash{"user_id": "Steeve", "count": 10,}"#),
             Ok((
                 "",
                 LogKind::App(AppLogKind::Journal(AppLogJournalKind::DepositCash(
@@ -1502,7 +1566,9 @@ mod test {
             ))
         );
         assert_eq!(
-            LogKind::parser().parse(r#"App::Journal BuyAsset UserBacket{"user_id": "Steeve", "backet": Backet{"asset_id":"bayc","count":1,},}"#),
+            LogKind::parser().parse(
+                r#"App::Journal BuyAsset UserBacket{"user_id": "Steeve", "backet": Backet{"asset_id":"bayc","count":1,},}"#
+            ),
             Ok((
                 "",
                 LogKind::App(AppLogKind::Journal(AppLogJournalKind::BuyAsset(
